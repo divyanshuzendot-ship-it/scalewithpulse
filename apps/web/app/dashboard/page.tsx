@@ -15,7 +15,18 @@ interface MetaAd {
   creative?: {
     id: string;
     name?: string;
+    title?: string;
+    body?: string;
+    imageUrl?: string;
+    thumbnailUrl?: string;
+    objectStoryId?: string;
   };
+}
+
+interface CreativeModalState {
+  adId: string;
+  adName: string;
+  creative: NonNullable<MetaAd['creative']>;
 }
 
 interface MetaAdSet {
@@ -60,12 +71,14 @@ function today() {
 export default function DashboardPage() {
   const [accounts, setAccounts] = useState<MetaAdAccount[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<string>('');
+  const [accountSearch, setAccountSearch] = useState<string>('');
   const [since, setSince] = useState<string>(defaultSinceDate());
   const [until, setUntil] = useState<string>(today());
   const [hierarchy, setHierarchy] = useState<MetaHierarchy | null>(null);
   const [isLoadingAccounts, setIsLoadingAccounts] = useState<boolean>(false);
   const [isLoadingHierarchy, setIsLoadingHierarchy] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
+  const [selectedCreative, setSelectedCreative] = useState<CreativeModalState | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -105,9 +118,33 @@ export default function DashboardPage() {
     };
   }, []);
 
+  const filteredAccounts = useMemo(() => {
+    const query = accountSearch.trim().toLowerCase();
+    if (!query) {
+      return accounts;
+    }
+
+    return accounts.filter((account) => {
+      return (
+        account.name.toLowerCase().includes(query) ||
+        account.accountId.toLowerCase().includes(query)
+      );
+    });
+  }, [accountSearch, accounts]);
+
+  const searchedAccountId = useMemo(() => {
+    const query = accountSearch.trim();
+    return /^\d+$/.test(query) ? query : '';
+  }, [accountSearch]);
+
+  const effectiveAccountId = useMemo(
+    () => searchedAccountId || selectedAccount,
+    [searchedAccountId, selectedAccount],
+  );
+
   const canFetchHierarchy = useMemo(
-    () => Boolean(selectedAccount && since && until),
-    [selectedAccount, since, until],
+    () => Boolean(effectiveAccountId && since && until),
+    [effectiveAccountId, since, until],
   );
 
   async function loadHierarchy() {
@@ -121,7 +158,7 @@ export default function DashboardPage() {
     try {
       const params = new URLSearchParams({ since, until });
       const response = await fetch(
-        `/api/meta/ad-accounts/${encodeURIComponent(selectedAccount)}/hierarchy?${params.toString()}`,
+        `/api/meta/ad-accounts/${encodeURIComponent(effectiveAccountId)}/hierarchy?${params.toString()}`,
       );
 
       const payload = (await response.json()) as MetaHierarchy & { message?: string };
@@ -131,6 +168,7 @@ export default function DashboardPage() {
       }
 
       setHierarchy(payload);
+      setSelectedCreative(null);
     } catch (loadError) {
       setHierarchy(null);
       setError(loadError instanceof Error ? loadError.message : 'Failed to load hierarchy.');
@@ -148,6 +186,41 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAccount]);
 
+  useEffect(() => {
+    const query = accountSearch.trim().toLowerCase();
+    if (!query) {
+      return;
+    }
+
+    const exactMatch = accounts.find((account) => {
+      return (
+        account.accountId.toLowerCase() === query ||
+        account.name.toLowerCase() === query
+      );
+    });
+
+    if (exactMatch && exactMatch.accountId !== selectedAccount) {
+      setSelectedAccount(exactMatch.accountId);
+    }
+  }, [accountSearch, accounts, selectedAccount]);
+
+  useEffect(() => {
+    if (!selectedCreative) {
+      return;
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setSelectedCreative(null);
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [selectedCreative]);
+
   return (
     <main className="dashboard-shell">
       <header className="dashboard-header">
@@ -161,17 +234,33 @@ export default function DashboardPage() {
       </header>
 
       <section className="controls-card">
+        <p className="muted">
+          Accounts loaded: {accounts.length}
+          {accountSearch.trim() ? ` | Matching search: ${filteredAccounts.length}` : ''}
+          {searchedAccountId ? ` | Using typed ID: ${searchedAccountId}` : ''}
+        </p>
         <div className="control-grid">
           <label>
             Ad account
+            <input
+              type="text"
+              placeholder="Search by account ID or name"
+              value={accountSearch}
+              onChange={(event) => {
+                setAccountSearch(event.target.value);
+              }}
+            />
+          </label>
+          <label>
+            Select account
             <select
               value={selectedAccount}
               onChange={(event) => {
                 setSelectedAccount(event.target.value);
               }}
-              disabled={isLoadingAccounts || accounts.length === 0}
+              disabled={isLoadingAccounts || filteredAccounts.length === 0}
             >
-              {accounts.map((account) => (
+              {filteredAccounts.map((account) => (
                 <option key={account.id} value={account.accountId}>
                   {account.name} ({account.accountId})
                 </option>
@@ -256,7 +345,21 @@ export default function DashboardPage() {
                           <td>{ad.status ?? '-'}</td>
                           <td>
                             {ad.creative
-                              ? `${ad.creative.name ?? 'Creative'} (${ad.creative.id})`
+                              ? (
+                                <button
+                                  type="button"
+                                  className="link-btn"
+                                  onClick={() => {
+                                    setSelectedCreative({
+                                      adId: ad.id,
+                                      adName: ad.name,
+                                      creative: ad.creative!,
+                                    });
+                                  }}
+                                >
+                                  {ad.creative.name ?? 'Creative'} ({ad.creative.id})
+                                </button>
+                              )
                               : '-'}
                           </td>
                         </tr>
@@ -268,6 +371,54 @@ export default function DashboardPage() {
             </tbody>
           </table>
         </section>
+      ) : null}
+
+      {selectedCreative ? (
+        <div
+          className="modal-overlay"
+          role="presentation"
+          onClick={() => {
+            setSelectedCreative(null);
+          }}
+        >
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Creative details"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <header className="modal-header">
+              <h2>Creative Details</h2>
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={() => {
+                  setSelectedCreative(null);
+                }}
+              >
+                Close
+              </button>
+            </header>
+            <div className="modal-content">
+              <p><strong>Ad:</strong> {selectedCreative.adName} ({selectedCreative.adId})</p>
+              <p><strong>Creative ID:</strong> {selectedCreative.creative.id}</p>
+              <p><strong>Name:</strong> {selectedCreative.creative.name ?? '-'}</p>
+              <p><strong>Title:</strong> {selectedCreative.creative.title ?? '-'}</p>
+              <p><strong>Body:</strong> {selectedCreative.creative.body ?? '-'}</p>
+              <p><strong>Object Story ID:</strong> {selectedCreative.creative.objectStoryId ?? '-'}</p>
+              {selectedCreative.creative.imageUrl || selectedCreative.creative.thumbnailUrl ? (
+                <img
+                  src={selectedCreative.creative.imageUrl ?? selectedCreative.creative.thumbnailUrl}
+                  alt={selectedCreative.creative.name ?? 'Creative preview'}
+                  className="creative-preview"
+                />
+              ) : null}
+            </div>
+          </section>
+        </div>
       ) : null}
     </main>
   );

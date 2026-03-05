@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { DateRangeQueryDto } from './dto/date-range.query.dto';
 import { MetaAdAccountDto } from './dto/meta-ad-account.dto';
 import {
@@ -26,6 +26,11 @@ interface GraphCampaign {
   objective?: string;
 }
 
+interface GraphBusiness {
+  id: string;
+  name: string;
+}
+
 interface GraphAdSet {
   id: string;
   campaign_id?: string;
@@ -42,6 +47,11 @@ interface GraphAd {
   creative?: {
     id: string;
     name?: string;
+    title?: string;
+    body?: string;
+    image_url?: string;
+    thumbnail_url?: string;
+    effective_object_story_id?: string;
   };
 }
 
@@ -53,16 +63,64 @@ interface GraphAdInsight {
 
 @Injectable()
 export class MetaService {
+  private readonly logger = new Logger(MetaService.name);
+
   constructor(private readonly metaClient: MetaGraphClient) {}
 
   async getAdAccounts(): Promise<{ data: MetaAdAccountDto[] }> {
-    const accounts = await this.metaClient.getAllPages<GraphAdAccount>(
-      'me/adaccounts',
-      {
+    const [directAccounts, businesses] = await Promise.all([
+      this.metaClient.getAllPages<GraphAdAccount>('me/adaccounts', {
         fields:
           'id,account_id,name,account_status,currency,timezone_name,business_name',
         limit: 100,
-      },
+      }),
+      this.metaClient.getAllPages<GraphBusiness>('me/businesses', {
+        fields: 'id,name',
+        limit: 100,
+      }),
+    ]);
+
+    const accountMap = new Map<string, GraphAdAccount>();
+    for (const account of directAccounts) {
+      accountMap.set(account.account_id ?? account.id, account);
+    }
+
+    const businessAccountRequests = businesses.flatMap((business) => [
+      this.metaClient.getAllPages<GraphAdAccount>(
+        `${business.id}/owned_ad_accounts`,
+        {
+          fields:
+            'id,account_id,name,account_status,currency,timezone_name,business_name',
+          limit: 100,
+        },
+      ),
+      this.metaClient.getAllPages<GraphAdAccount>(
+        `${business.id}/client_ad_accounts`,
+        {
+          fields:
+            'id,account_id,name,account_status,currency,timezone_name,business_name',
+          limit: 100,
+        },
+      ),
+    ]);
+
+    const settledBusinessAccounts = await Promise.allSettled(
+      businessAccountRequests,
+    );
+
+    for (const result of settledBusinessAccounts) {
+      if (result.status !== 'fulfilled') {
+        this.logger.warn('Failed to fetch business ad accounts for dropdown.');
+        continue;
+      }
+
+      for (const account of result.value) {
+        accountMap.set(account.account_id ?? account.id, account);
+      }
+    }
+
+    const accounts = [...accountMap.values()].sort((a, b) =>
+      a.name.localeCompare(b.name),
     );
 
     return {
@@ -89,15 +147,16 @@ export class MetaService {
     const [campaigns, adsets, ads, activeAdIds] = await Promise.all([
       this.metaClient.getAllPages<GraphCampaign>(`${accountPath}/campaigns`, {
         fields: 'id,name,status,objective',
-        limit: 200,
+        limit: 100,
       }),
       this.metaClient.getAllPages<GraphAdSet>(`${accountPath}/adsets`, {
         fields: 'id,campaign_id,name,status',
-        limit: 200,
+        limit: 100,
       }),
       this.metaClient.getAllPages<GraphAd>(`${accountPath}/ads`, {
-        fields: 'id,campaign_id,adset_id,name,status,creative{id,name}',
-        limit: 200,
+        fields:
+          'id,campaign_id,adset_id,name,status,creative{id,name,thumbnail_url}',
+        limit: 100,
       }),
       range
         ? this.fetchActiveAdIds(accountPath, range.since, range.until)
@@ -149,6 +208,8 @@ export class MetaService {
           ? {
               id: ad.creative.id,
               name: ad.creative.name,
+              imageUrl: ad.creative.thumbnail_url,
+              thumbnailUrl: ad.creative.thumbnail_url,
             }
           : undefined,
       };
