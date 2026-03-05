@@ -1,6 +1,11 @@
 export interface MetaCreativeNodeDto {
   id: string;
   name?: string;
+  title?: string;
+  body?: string;
+  imageUrl?: string;
+  thumbnailUrl?: string;
+  objectStoryId?: string;
 }
 
 export interface MetaAdNodeDto {
