@@ -18,4 +18,20 @@ export class MetaController {
   ) {
     return this.metaService.getHierarchy(id, query);
   }
+
+  @Get('ad-accounts/:id/report')
+  async getReport(
+    @Param('id') id: string,
+    @Query() query: DateRangeQueryDto,
+  ) {
+    return this.metaService.getReport(id, query);
+  }
+
+  @Get('ad-accounts/:id/trends')
+  async getDailyTrends(
+    @Param('id') id: string,
+    @Query() query: DateRangeQueryDto,
+  ) {
+    return this.metaService.getDailyTrends(id, query);
+  }
 }
