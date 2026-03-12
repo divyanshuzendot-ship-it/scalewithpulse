@@ -16,22 +16,12 @@ export async function GET(
   try {
     const { id } = await context.params;
     const url = new URL(request.url);
-    const since = url.searchParams.get('since');
-    const until = url.searchParams.get('until');
     const projectId = url.searchParams.get('projectId');
     const product = url.searchParams.get('product');
 
     const upstream = new URL(
-      `${getApiBaseUrl()}/v1/meta/ad-accounts/${encodeURIComponent(id)}/report`,
+      `${getApiBaseUrl()}/v1/meta/ad-accounts/${encodeURIComponent(id)}/incrementality`,
     );
-
-    if (since) {
-      upstream.searchParams.set('since', since);
-    }
-
-    if (until) {
-      upstream.searchParams.set('until', until);
-    }
     if (projectId) {
       upstream.searchParams.set('projectId', projectId);
     }
@@ -48,7 +38,7 @@ export async function GET(
   } catch (error) {
     return NextResponse.json(
       {
-        message: 'Failed to load report from API.',
+        message: 'Failed to load incrementality from API.',
         error: error instanceof Error ? error.message : 'unknown',
       },
       { status: 500 },
