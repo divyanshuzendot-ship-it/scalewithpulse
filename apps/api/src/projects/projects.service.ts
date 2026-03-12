@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   NotFoundException,
   OnModuleDestroy,
@@ -11,6 +12,7 @@ export interface ProjectTargets {
   cpaTarget: number | null;
   roasTarget: number | null;
   dailySpendTarget: number | null;
+  revenueTarget: number | null;
 }
 
 export interface CampaignTargets {
@@ -22,7 +24,7 @@ export interface TargetHistoryEntry {
   id: string;
   projectId: string;
   campaignId: string | null;
-  targetType: 'cpa' | 'roas' | 'daily_spend';
+  targetType: 'cpa' | 'roas' | 'daily_spend' | 'revenue';
   oldValue: number | null;
   newValue: number | null;
   changedBy: string;
@@ -33,7 +35,11 @@ export interface TargetHistoryEntry {
 export interface ProjectRecord {
   id: string;
   name: string;
+  status: 'active' | 'paused' | 'archived' | 'deleted';
   adAccountIds: string[];
+  products: string[];
+  optimizationMethod: 'first_click_present' | 'first_click_absent';
+  deviationThresholdPct: number;
   targets: ProjectTargets;
   campaignTargets: Record<string, CampaignTargets>;
   createdAt: string;
@@ -113,9 +119,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     const result = await this.pool.query<{
       id: string;
       name: string;
+      status: 'active' | 'paused' | 'archived' | 'deleted';
+      optimization_method: 'first_click_present' | 'first_click_absent';
+      deviation_threshold_pct: string | null;
       cpa_target: string | null;
       roas_target: string | null;
       daily_spend_target: string | null;
+      revenue_target: string | null;
       created_at: string;
       updated_at: string;
     }>(
@@ -123,15 +133,22 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         SELECT DISTINCT
           p.id,
           p.name,
+          p.status,
+          p.optimization_method,
+          p.deviation_threshold_pct,
           pt.cpa_target,
           pt.roas_target,
           pt.daily_spend_target,
+          pt.revenue_target,
           p.created_at,
           p.updated_at
         FROM projects p
         LEFT JOIN project_targets pt ON p.id = pt.project_id
-        LEFT JOIN project_ad_accounts paa ON p.id = paa.project_id
+        LEFT JOIN project_ad_accounts paa
+          ON p.id = paa.project_id
+         AND paa.removed_at IS NULL
         WHERE ($1::text IS NULL OR paa.ad_account_id = $1)
+          AND p.status <> 'deleted'
         ORDER BY p.updated_at DESC
       `,
       [adAccountId ?? null],
@@ -143,25 +160,70 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   async create(payload: {
     name: string;
     adAccountIds: string[];
+    products?: string[];
+    optimizationMethod?: 'first_click_present' | 'first_click_absent';
+    deviationThresholdPct?: number;
     targets?: Partial<ProjectTargets>;
     changedBy?: string;
   }) {
     const projectId = randomUUID();
     const now = new Date().toISOString();
+    const normalizedAdAccountIds = [...new Set(payload.adAccountIds)];
+    await this.assertNoActiveProjectAccountConflicts(normalizedAdAccountIds);
 
     await this.pool.query(
-      `INSERT INTO projects (id, name, created_at, updated_at) VALUES ($1, $2, $3, $4)`,
-      [projectId, payload.name, now, now],
+      `
+        INSERT INTO projects (id, name, status, optimization_method, deviation_threshold_pct, created_at, updated_at)
+        VALUES ($1, $2, 'active', $3, $4, $5, $6)
+      `,
+      [
+        projectId,
+        payload.name,
+        payload.optimizationMethod ?? 'first_click_absent',
+        payload.deviationThresholdPct ?? 10,
+        now,
+        now,
+      ],
     );
 
-    for (const adAccountId of payload.adAccountIds) {
+    for (const adAccountId of normalizedAdAccountIds) {
       await this.pool.query(
         `
-          INSERT INTO project_ad_accounts (id, project_id, ad_account_id, created_at)
-          VALUES ($1, $2, $3, $4)
-          ON CONFLICT (project_id, ad_account_id) DO NOTHING
+          INSERT INTO project_ad_accounts (
+            id,
+            project_id,
+            ad_account_id,
+            created_at,
+            added_at,
+            removed_at,
+            backfill_status
+          )
+          VALUES ($1, $2, $3, $4, $4, NULL, 'pending')
+          ON CONFLICT (project_id, ad_account_id) DO UPDATE SET
+            removed_at = NULL,
+            added_at = EXCLUDED.added_at,
+            backfill_status = 'pending'
         `,
         [randomUUID(), projectId, adAccountId, now],
+      );
+    }
+
+    const normalizedProducts = this.normalizeProducts(payload.products ?? []);
+    for (const productName of normalizedProducts) {
+      await this.pool.query(
+        `
+          INSERT INTO project_products (id, project_id, name, created_by, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (project_id, name) DO NOTHING
+        `,
+        [
+          randomUUID(),
+          projectId,
+          productName,
+          payload.changedBy ?? 'system',
+          now,
+          now,
+        ],
       );
     }
 
@@ -169,18 +231,19 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       cpaTarget: payload.targets?.cpaTarget ?? null,
       roasTarget: payload.targets?.roasTarget ?? null,
       dailySpendTarget: payload.targets?.dailySpendTarget ?? null,
+      revenueTarget: payload.targets?.revenueTarget ?? null,
     };
     await this.pool.query(
       `
-        INSERT INTO project_targets (project_id, cpa_target, roas_target, daily_spend_target, updated_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO project_targets (project_id, cpa_target, roas_target, daily_spend_target, revenue_target, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
       `,
-      [projectId, next.cpaTarget, next.roasTarget, next.dailySpendTarget, now],
+      [projectId, next.cpaTarget, next.roasTarget, next.dailySpendTarget, next.revenueTarget, now],
     );
 
     await this.logProjectTargetChanges(
       projectId,
-      { cpaTarget: null, roasTarget: null, dailySpendTarget: null },
+      { cpaTarget: null, roasTarget: null, dailySpendTarget: null, revenueTarget: null },
       next,
       payload.changedBy ?? 'system',
       'project_setup',
@@ -193,9 +256,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     const result = await this.pool.query<{
       id: string;
       name: string;
+      status: 'active' | 'paused' | 'archived' | 'deleted';
+      optimization_method: 'first_click_present' | 'first_click_absent';
+      deviation_threshold_pct: string | null;
       cpa_target: string | null;
       roas_target: string | null;
       daily_spend_target: string | null;
+      revenue_target: string | null;
       created_at: string;
       updated_at: string;
     }>(
@@ -203,9 +270,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         SELECT
           p.id,
           p.name,
+          p.status,
+          p.optimization_method,
+          p.deviation_threshold_pct,
           pt.cpa_target,
           pt.roas_target,
           pt.daily_spend_target,
+          pt.revenue_target,
           p.created_at,
           p.updated_at
         FROM projects p
@@ -242,16 +313,21 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         changes.dailySpendTarget !== undefined
           ? changes.dailySpendTarget
           : previous.dailySpendTarget,
+      revenueTarget:
+        changes.revenueTarget !== undefined
+          ? changes.revenueTarget
+          : previous.revenueTarget,
     };
 
     await this.pool.query(
       `
-        INSERT INTO project_targets (project_id, cpa_target, roas_target, daily_spend_target, updated_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO project_targets (project_id, cpa_target, roas_target, daily_spend_target, revenue_target, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (project_id) DO UPDATE SET
           cpa_target = EXCLUDED.cpa_target,
           roas_target = EXCLUDED.roas_target,
           daily_spend_target = EXCLUDED.daily_spend_target,
+          revenue_target = EXCLUDED.revenue_target,
           updated_at = EXCLUDED.updated_at
       `,
       [
@@ -259,6 +335,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         next.cpaTarget,
         next.roasTarget,
         next.dailySpendTarget,
+        next.revenueTarget,
         new Date().toISOString(),
       ],
     );
@@ -278,12 +355,52 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return this.get(projectId);
   }
 
+  async updateSettings(
+    projectId: string,
+    changes: {
+      optimizationMethod?: 'first_click_present' | 'first_click_absent';
+      status?: 'active' | 'paused' | 'archived' | 'deleted';
+      deviationThresholdPct?: number;
+    },
+  ) {
+    const currentProject = await this.get(projectId);
+    const now = new Date().toISOString();
+    const nextStatus = changes.status ?? currentProject.status;
+    if (!['active', 'paused', 'archived', 'deleted'].includes(nextStatus)) {
+      throw new BadRequestException('Invalid project status.');
+    }
+    if (nextStatus === 'active' && currentProject.status !== 'active') {
+      await this.assertNoActiveProjectAccountConflicts(
+        currentProject.adAccountIds,
+        projectId,
+      );
+    }
+    await this.pool.query(
+      `
+        UPDATE projects
+        SET optimization_method = COALESCE($2, optimization_method),
+            status = COALESCE($3, status),
+            deviation_threshold_pct = COALESCE($4, deviation_threshold_pct),
+            updated_at = $5
+        WHERE id = $1
+      `,
+      [
+        projectId,
+        changes.optimizationMethod ?? null,
+        changes.status ?? null,
+        changes.deviationThresholdPct ?? null,
+        now,
+      ],
+    );
+    return this.get(projectId);
+  }
+
   async listTargetHistory(projectId: string) {
     const result = await this.pool.query<{
       id: string;
       project_id: string;
       campaign_id: string | null;
-      target_type: 'cpa' | 'roas' | 'daily_spend';
+      target_type: 'cpa' | 'roas' | 'daily_spend' | 'revenue';
       old_value: string | null;
       new_value: string | null;
       changed_by: string;
@@ -396,19 +513,47 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async replaceProjectAdAccounts(projectId: string, adAccountIds: string[]) {
-    await this.get(projectId);
+    const project = await this.get(projectId);
+    const normalizedAdAccountIds = [...new Set(adAccountIds)];
+    if (project.status === 'active') {
+      await this.assertNoActiveProjectAccountConflicts(
+        normalizedAdAccountIds,
+        projectId,
+      );
+    }
+    const now = new Date().toISOString();
     await this.pool.query(
-      `DELETE FROM project_ad_accounts WHERE project_id = $1`,
-      [projectId],
+      `
+        UPDATE project_ad_accounts
+        SET removed_at = $2
+        WHERE project_id = $1
+          AND ad_account_id <> ALL($3::text[])
+          AND removed_at IS NULL
+      `,
+      [projectId, now, normalizedAdAccountIds],
     );
 
-    const now = new Date().toISOString();
-    for (const adAccountId of adAccountIds) {
+    for (const adAccountId of normalizedAdAccountIds) {
       await this.pool.query(
         `
-          INSERT INTO project_ad_accounts (id, project_id, ad_account_id, created_at)
-          VALUES ($1, $2, $3, $4)
-          ON CONFLICT (project_id, ad_account_id) DO NOTHING
+          INSERT INTO project_ad_accounts (
+            id,
+            project_id,
+            ad_account_id,
+            created_at,
+            added_at,
+            removed_at,
+            backfill_status
+          )
+          VALUES ($1, $2, $3, $4, $4, NULL, 'pending')
+          ON CONFLICT (project_id, ad_account_id) DO UPDATE SET
+            removed_at = NULL,
+            added_at = EXCLUDED.added_at,
+            backfill_status = CASE
+              WHEN project_ad_accounts.backfill_status = 'completed'
+                THEN project_ad_accounts.backfill_status
+              ELSE 'pending'
+            END
         `,
         [randomUUID(), projectId, adAccountId, now],
       );
@@ -422,8 +567,84 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return this.get(projectId);
   }
 
-  getTagCatalog() {
-    return TAG_CATALOG;
+  async listProducts(projectId: string) {
+    await this.assertProjectExists(projectId);
+    const result = await this.pool.query<{ name: string }>(
+      `
+        SELECT name
+        FROM project_products
+        WHERE project_id = $1
+        ORDER BY lower(name) ASC
+      `,
+      [projectId],
+    );
+    return result.rows.map((row) => row.name);
+  }
+
+  async replaceProducts(
+    projectId: string,
+    products: string[],
+    changedBy = 'system',
+  ) {
+    await this.assertProjectExists(projectId);
+    const next = this.normalizeProducts(products);
+    await this.pool.query(
+      `DELETE FROM project_products WHERE project_id = $1`,
+      [projectId],
+    );
+    const now = new Date().toISOString();
+    for (const productName of next) {
+      await this.pool.query(
+        `
+          INSERT INTO project_products (id, project_id, name, created_by, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (project_id, name) DO NOTHING
+        `,
+        [randomUUID(), projectId, productName, changedBy, now, now],
+      );
+    }
+
+    // Clear product tags that reference removed values.
+    if (next.length > 0) {
+      await this.pool.query(
+        `
+          DELETE FROM project_entity_tags
+          WHERE project_id = $1
+            AND category_key = 'product'
+            AND value <> ALL($2::text[])
+        `,
+        [projectId, next],
+      );
+    } else {
+      await this.pool.query(
+        `
+          DELETE FROM project_entity_tags
+          WHERE project_id = $1
+            AND category_key = 'product'
+        `,
+        [projectId],
+      );
+    }
+
+    await this.pool.query(`UPDATE projects SET updated_at = $2 WHERE id = $1`, [
+      projectId,
+      now,
+    ]);
+
+    return this.listProducts(projectId);
+  }
+
+  async getTagCatalog(projectId: string) {
+    const products = await this.listProducts(projectId);
+    return TAG_CATALOG.map((category) => {
+      if (category.key !== 'product') {
+        return category;
+      }
+      return {
+        ...category,
+        values: products,
+      };
+    });
   }
 
   async listEntityTags(projectId: string, accountId: string) {
@@ -515,10 +736,14 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     since: string;
     until: string;
     tagKeys: string[];
+    product?: string | null;
   }) {
-    await this.get(payload.projectId);
+    const project = await this.get(payload.projectId);
+    const useFirstClickRevenue =
+      project.optimizationMethod === 'first_click_present';
 
     const adRows = await this.pool.query<{
+      date: string;
       ad_id: string;
       adset_id: string;
       campaign_id: string;
@@ -529,26 +754,30 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       outbound_clicks: string;
       revenue_7d_click: string;
       revenue_1d_view: string;
+      revenue_incremental: string;
+      revenue_fc: string;
     }>(
       `
         SELECT
+          ai.date,
           ac.ad_id,
           ac.adset_id,
           ac.campaign_id,
-          ai.spend,
-          ai.purchases,
-          ai.impressions,
-          ai.reach,
-          ai.outbound_clicks,
-          ai.revenue_7d_click,
-          ai.revenue_1d_view
+          ai.spend AS spend,
+          ai.purchases AS purchases,
+          ai.impressions AS impressions,
+          ai.reach AS reach,
+          ai.outbound_clicks AS outbound_clicks,
+          ai.revenue_7d_click AS revenue_7d_click,
+          ai.revenue_1d_view AS revenue_1d_view,
+          ai.revenue_incremental AS revenue_incremental,
+          ai.revenue_fc AS revenue_fc
         FROM ad_cache ac
-        JOIN ad_insights_range ai
+        JOIN ad_insights_daily ai
           ON ai.account_id = ac.account_id
          AND ai.ad_id = ac.ad_id
         WHERE ac.account_id = $1
-          AND ai.since = $2
-          AND ai.until = $3
+          AND ai.date BETWEEN $2 AND $3
       `,
       [payload.accountId, payload.since, payload.until],
     );
@@ -576,8 +805,20 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         outboundClicks: number;
       }
     >();
+    const groupedDaily = new Map<string, Map<string, { spend: number; revenue: number }>>();
 
     for (const row of adRows.rows) {
+      if (payload.product) {
+        const productValue =
+          tagMap.get(`ad:${row.ad_id}:product`) ??
+          tagMap.get(`adset:${row.adset_id}:product`) ??
+          tagMap.get(`campaign:${row.campaign_id}:product`) ??
+          'Untagged';
+        if (productValue !== payload.product) {
+          continue;
+        }
+      }
+
       const keyParts = payload.tagKeys.map((tagKey) => {
         return (
           tagMap.get(`ad:${row.ad_id}:${tagKey}`) ??
@@ -587,6 +828,11 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         );
       });
       const groupKey = keyParts.join(' / ');
+      const blendedRevenue =
+        this.toNumber(row.revenue_7d_click) + this.toNumber(row.revenue_1d_view);
+      const revenueForMroas = useFirstClickRevenue
+        ? this.toNumber(row.revenue_fc)
+        : this.toNumber(row.revenue_incremental);
       const current = grouped.get(groupKey) ?? {
         spend: 0,
         purchases: 0,
@@ -599,14 +845,20 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         spend: current.spend + this.toNumber(row.spend),
         purchases: current.purchases + this.toNumber(row.purchases),
         revenue:
-          current.revenue +
-          this.toNumber(row.revenue_7d_click) +
-          this.toNumber(row.revenue_1d_view),
+          current.revenue + blendedRevenue,
         reach: current.reach + this.toNumber(row.reach),
         impressions: current.impressions + this.toNumber(row.impressions),
         outboundClicks:
           current.outboundClicks + this.toNumber(row.outbound_clicks),
       });
+
+      const currentDaily = groupedDaily.get(groupKey) ?? new Map();
+      const bucket = currentDaily.get(row.date) ?? { spend: 0, revenue: 0 };
+      currentDaily.set(row.date, {
+        spend: bucket.spend + this.toNumber(row.spend),
+        revenue: bucket.revenue + revenueForMroas,
+      });
+      groupedDaily.set(groupKey, currentDaily);
     }
 
     const rows = [...grouped.entries()]
@@ -622,6 +874,28 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
           values.outboundClicks > 0
             ? (values.purchases / values.outboundClicks) * 100
             : null,
+        mroas: (() => {
+          const daily = groupedDaily.get(label);
+          if (!daily) {
+            return null;
+          }
+          const points = [...daily.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+          const deltas: number[] = [];
+          for (let index = 1; index < points.length; index += 1) {
+            const currentPoint = points[index];
+            const previousPoint = points[index - 1];
+            if (!currentPoint || !previousPoint) {
+              continue;
+            }
+            const deltaSpend = currentPoint[1].spend - previousPoint[1].spend;
+            const deltaRevenue = currentPoint[1].revenue - previousPoint[1].revenue;
+            if (Math.abs(deltaSpend) <= 0.01) {
+              continue;
+            }
+            deltas.push(deltaRevenue / Math.abs(deltaSpend));
+          }
+          return this.median(deltas);
+        })(),
       }))
       .sort((a, b) => b.spend - a.spend);
 
@@ -631,9 +905,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   private async hydrateProject(row: {
     id: string;
     name: string;
+    status: 'active' | 'paused' | 'archived' | 'deleted';
+    optimization_method: 'first_click_present' | 'first_click_absent';
+    deviation_threshold_pct: string | null;
     cpa_target: string | null;
     roas_target: string | null;
     daily_spend_target: string | null;
+    revenue_target: string | null;
     created_at: string;
     updated_at: string;
   }): Promise<ProjectRecord> {
@@ -642,7 +920,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         SELECT ad_account_id
         FROM project_ad_accounts
         WHERE project_id = $1
-        ORDER BY created_at ASC
+          AND removed_at IS NULL
+        ORDER BY COALESCE(added_at, created_at) ASC
       `,
       [row.id],
     );
@@ -650,11 +929,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return {
       id: row.id,
       name: row.name,
+      status: row.status ?? 'active',
       adAccountIds: adAccountsResult.rows.map((item) => item.ad_account_id),
+      products: await this.listProducts(row.id),
+      optimizationMethod: row.optimization_method ?? 'first_click_absent',
+      deviationThresholdPct: this.toNullableNumber(row.deviation_threshold_pct) ?? 10,
       targets: {
         cpaTarget: this.toNullableNumber(row.cpa_target),
         roasTarget: this.toNullableNumber(row.roas_target),
         dailySpendTarget: this.toNullableNumber(row.daily_spend_target),
+        revenueTarget: this.toNullableNumber(row.revenue_target),
       },
       campaignTargets: await this.loadCampaignTargets(row.id),
       createdAt: row.created_at,
@@ -718,6 +1002,15 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       'daily_spend',
       previous.dailySpendTarget,
       next.dailySpendTarget,
+      changedBy,
+      source,
+    );
+    await this.logEntry(
+      projectId,
+      null,
+      'revenue',
+      previous.revenueTarget,
+      next.revenueTarget,
       changedBy,
       source,
     );
@@ -790,30 +1083,131 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return Number.isFinite(parsed) ? parsed : 0;
   }
 
+  private median(values: number[]) {
+    if (values.length < 3) {
+      return null;
+    }
+    const sorted = [...values].sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 0) {
+      return (sorted[middle - 1]! + sorted[middle]!) / 2;
+    }
+    return sorted[middle] ?? null;
+  }
+
+  private normalizeProducts(products: string[]) {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const product of products) {
+      const value = product.trim();
+      if (!value) {
+        continue;
+      }
+      const key = value.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      normalized.push(value.slice(0, 100));
+    }
+    return normalized;
+  }
+
+  private async assertNoActiveProjectAccountConflicts(
+    adAccountIds: string[],
+    excludedProjectId?: string,
+  ) {
+    if (!adAccountIds.length) {
+      return;
+    }
+    const result = await this.pool.query<{
+      ad_account_id: string;
+      project_name: string;
+      project_id: string;
+    }>(
+      `
+        SELECT paa.ad_account_id, p.name AS project_name, p.id AS project_id
+        FROM project_ad_accounts paa
+        JOIN projects p ON p.id = paa.project_id
+        WHERE paa.ad_account_id = ANY($1::text[])
+          AND paa.removed_at IS NULL
+          AND p.status = 'active'
+          AND ($2::text IS NULL OR p.id <> $2)
+        ORDER BY p.updated_at DESC
+      `,
+      [adAccountIds, excludedProjectId ?? null],
+    );
+
+    if (!result.rows.length) {
+      return;
+    }
+
+    const conflict = result.rows[0];
+    throw new BadRequestException(
+      `Ad account ${conflict?.ad_account_id} is already mapped to active project "${conflict?.project_name}" (${conflict?.project_id}).`,
+    );
+  }
+
   private async initSchema() {
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        optimization_method TEXT NOT NULL DEFAULT 'first_click_absent',
+        deviation_threshold_pct NUMERIC NOT NULL DEFAULT 10,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL
       );
+
+      ALTER TABLE projects
+        ADD COLUMN IF NOT EXISTS optimization_method TEXT NOT NULL DEFAULT 'first_click_absent';
+      ALTER TABLE projects
+        ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+      ALTER TABLE projects
+        ADD COLUMN IF NOT EXISTS deviation_threshold_pct NUMERIC NOT NULL DEFAULT 10;
 
       CREATE TABLE IF NOT EXISTS project_ad_accounts (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
         ad_account_id TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
+        ad_account_name TEXT NULL,
+        currency TEXT NULL,
+        timezone TEXT NULL,
+        added_at TIMESTAMPTZ NULL,
+        removed_at TIMESTAMPTZ NULL,
+        backfill_status TEXT NOT NULL DEFAULT 'pending',
+        backfill_started_at TIMESTAMPTZ NULL,
+        backfill_completed_at TIMESTAMPTZ NULL,
+        last_sync_at TIMESTAMPTZ NULL,
+        last_sync_status TEXT NULL,
         UNIQUE (project_id, ad_account_id)
       );
+
+      ALTER TABLE project_ad_accounts
+        ADD COLUMN IF NOT EXISTS ad_account_name TEXT NULL,
+        ADD COLUMN IF NOT EXISTS currency TEXT NULL,
+        ADD COLUMN IF NOT EXISTS timezone TEXT NULL,
+        ADD COLUMN IF NOT EXISTS added_at TIMESTAMPTZ NULL,
+        ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ NULL,
+        ADD COLUMN IF NOT EXISTS backfill_status TEXT NOT NULL DEFAULT 'pending',
+        ADD COLUMN IF NOT EXISTS backfill_started_at TIMESTAMPTZ NULL,
+        ADD COLUMN IF NOT EXISTS backfill_completed_at TIMESTAMPTZ NULL,
+        ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMPTZ NULL,
+        ADD COLUMN IF NOT EXISTS last_sync_status TEXT NULL;
 
       CREATE TABLE IF NOT EXISTS project_targets (
         project_id TEXT PRIMARY KEY,
         cpa_target NUMERIC NULL,
         roas_target NUMERIC NULL,
         daily_spend_target NUMERIC NULL,
+        revenue_target NUMERIC NULL,
         updated_at TIMESTAMPTZ NOT NULL
       );
+
+      ALTER TABLE project_targets
+        ADD COLUMN IF NOT EXISTS revenue_target NUMERIC NULL;
 
       CREATE TABLE IF NOT EXISTS campaign_targets (
         project_id TEXT NOT NULL,
@@ -855,6 +1249,29 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
 
       CREATE INDEX IF NOT EXISTS idx_project_entity_tags_lookup
       ON project_entity_tags (project_id, account_id, category_key, entity_type, entity_id);
+
+      CREATE TABLE IF NOT EXISTS project_products (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (project_id, name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_project_products_project
+      ON project_products (project_id, lower(name));
     `);
+  }
+
+  private async assertProjectExists(projectId: string) {
+    const result = await this.pool.query<{ id: string }>(
+      `SELECT id FROM projects WHERE id = $1`,
+      [projectId],
+    );
+    if (!result.rows[0]) {
+      throw new NotFoundException('Project not found.');
+    }
   }
 }

@@ -25,10 +25,14 @@ export class ProjectsController {
     payload: {
       name: string;
       adAccountIds: string[];
+      products?: string[];
+      optimizationMethod?: 'first_click_present' | 'first_click_absent';
+      deviationThresholdPct?: number;
       targets?: {
         cpaTarget?: number | null;
         roasTarget?: number | null;
         dailySpendTarget?: number | null;
+        revenueTarget?: number | null;
       };
       changedBy?: string;
     },
@@ -49,10 +53,24 @@ export class ProjectsController {
       cpaTarget?: number | null;
       roasTarget?: number | null;
       dailySpendTarget?: number | null;
+      revenueTarget?: number | null;
       changedBy?: string;
     },
   ) {
     return this.projectsService.updateTargets(id, payload, payload.changedBy);
+  }
+
+  @Patch(':id/settings')
+  updateSettings(
+    @Param('id') id: string,
+    @Body()
+    payload: {
+      optimizationMethod?: 'first_click_present' | 'first_click_absent';
+      status?: 'active' | 'paused' | 'archived' | 'deleted';
+      deviationThresholdPct?: number;
+    },
+  ) {
+    return this.projectsService.updateSettings(id, payload);
   }
 
   @Get(':id/target-history')
@@ -96,8 +114,27 @@ export class ProjectsController {
   }
 
   @Get(':id/tag-catalog')
-  tagCatalog() {
-    return { data: this.projectsService.getTagCatalog() };
+  async tagCatalog(@Param('id') id: string) {
+    return { data: await this.projectsService.getTagCatalog(id) };
+  }
+
+  @Get(':id/products')
+  async listProducts(@Param('id') id: string) {
+    return { data: await this.projectsService.listProducts(id) };
+  }
+
+  @Put(':id/products')
+  async replaceProducts(
+    @Param('id') id: string,
+    @Body() payload: { products: string[]; changedBy?: string },
+  ) {
+    return {
+      data: await this.projectsService.replaceProducts(
+        id,
+        payload.products,
+        payload.changedBy,
+      ),
+    };
   }
 
   @Get(':id/tags')
@@ -141,6 +178,7 @@ export class ProjectsController {
       since: string;
       until: string;
       tagKeys: string[];
+      product?: string | null;
     },
   ) {
     return this.projectsService.buildCustomBreakdown({
@@ -149,6 +187,7 @@ export class ProjectsController {
       since: payload.since,
       until: payload.until,
       tagKeys: payload.tagKeys,
+      product: payload.product,
     });
   }
 }

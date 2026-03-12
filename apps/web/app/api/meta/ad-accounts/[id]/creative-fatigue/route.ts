@@ -5,7 +5,6 @@ function getApiBaseUrl() {
   if (!apiBaseUrl) {
     throw new Error('API_BASE_URL is required');
   }
-
   return apiBaseUrl;
 }
 
@@ -16,22 +15,11 @@ export async function GET(
   try {
     const { id } = await context.params;
     const url = new URL(request.url);
-    const since = url.searchParams.get('since');
-    const until = url.searchParams.get('until');
+    const upstream = new URL(
+      `${getApiBaseUrl()}/v1/meta/ad-accounts/${encodeURIComponent(id)}/creative-fatigue`,
+    );
     const projectId = url.searchParams.get('projectId');
     const product = url.searchParams.get('product');
-
-    const upstream = new URL(
-      `${getApiBaseUrl()}/v1/meta/ad-accounts/${encodeURIComponent(id)}/report`,
-    );
-
-    if (since) {
-      upstream.searchParams.set('since', since);
-    }
-
-    if (until) {
-      upstream.searchParams.set('until', until);
-    }
     if (projectId) {
       upstream.searchParams.set('projectId', projectId);
     }
@@ -39,16 +27,13 @@ export async function GET(
       upstream.searchParams.set('product', product);
     }
 
-    const response = await fetch(upstream.toString(), {
-      cache: 'no-store',
-    });
-
+    const response = await fetch(upstream.toString(), { cache: 'no-store' });
     const body = await response.json();
     return NextResponse.json(body, { status: response.status });
   } catch (error) {
     return NextResponse.json(
       {
-        message: 'Failed to load report from API.',
+        message: 'Failed to load creative fatigue from API.',
         error: error instanceof Error ? error.message : 'unknown',
       },
       { status: 500 },

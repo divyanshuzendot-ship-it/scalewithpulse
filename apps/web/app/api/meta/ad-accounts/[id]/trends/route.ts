@@ -18,6 +18,8 @@ export async function GET(
     const url = new URL(request.url);
     const since = url.searchParams.get('since');
     const until = url.searchParams.get('until');
+    const projectId = url.searchParams.get('projectId');
+    const product = url.searchParams.get('product');
 
     const upstream = new URL(
       `${getApiBaseUrl()}/v1/meta/ad-accounts/${encodeURIComponent(id)}/trends`,
@@ -29,6 +31,12 @@ export async function GET(
 
     if (until) {
       upstream.searchParams.set('until', until);
+    }
+    if (projectId) {
+      upstream.searchParams.set('projectId', projectId);
+    }
+    if (product) {
+      upstream.searchParams.set('product', product);
     }
 
     const response = await fetch(upstream.toString(), {

@@ -15,21 +15,48 @@ export class MetaController {
   async getHierarchy(
     @Param('id') id: string,
     @Query() query: DateRangeQueryDto,
+    @Query('projectId') projectId?: string,
+    @Query('product') product?: string,
   ) {
-    return this.metaService.getHierarchy(id, query);
+    return this.metaService.getHierarchy(id, query, { projectId, product });
   }
 
   @Get('ad-accounts/:id/report')
-  async getReport(@Param('id') id: string, @Query() query: DateRangeQueryDto) {
-    return this.metaService.getReport(id, query);
+  async getReport(
+    @Param('id') id: string,
+    @Query() query: DateRangeQueryDto,
+    @Query('projectId') projectId?: string,
+    @Query('product') product?: string,
+  ) {
+    return this.metaService.getReport(id, query, { projectId, product });
   }
 
   @Get('ad-accounts/:id/trends')
   async getDailyTrends(
     @Param('id') id: string,
     @Query() query: DateRangeQueryDto,
+    @Query('projectId') projectId?: string,
+    @Query('product') product?: string,
   ) {
-    return this.metaService.getDailyTrends(id, query);
+    return this.metaService.getDailyTrends(id, query, { projectId, product });
+  }
+
+  @Get('ad-accounts/:id/incrementality')
+  async getIncrementality(
+    @Param('id') id: string,
+    @Query('projectId') projectId?: string,
+    @Query('product') product?: string,
+  ): Promise<unknown> {
+    return this.metaService.getIncrementality(id, { projectId, product });
+  }
+
+  @Get('ad-accounts/:id/creative-fatigue')
+  async getCreativeFatigue(
+    @Param('id') id: string,
+    @Query('projectId') projectId?: string,
+    @Query('product') product?: string,
+  ): Promise<unknown> {
+    return this.metaService.getCreativeFatigue(id, { projectId, product });
   }
 
   @Post('sync/daily')

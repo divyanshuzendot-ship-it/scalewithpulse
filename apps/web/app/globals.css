@@ -373,6 +373,27 @@ button:disabled {
   font-weight: 600;
 }
 
+.chart-legend-btn {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chart-legend-btn:hover {
+  transform: none;
+  color: #0f172a;
+}
+
+.chart-legend-btn.muted {
+  opacity: 0.5;
+}
+
 .chart-legend i {
   display: inline-block;
   width: 10px;
@@ -381,10 +402,43 @@ button:disabled {
   margin-right: 6px;
 }
 
+.chart-crosshair {
+  stroke: #334155;
+  stroke-width: 1.4;
+  stroke-dasharray: 4 4;
+  opacity: 0.7;
+}
+
+.chart-tooltip {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  display: grid;
+  gap: 2px;
+  font-size: 0.8rem;
+}
+
 .kpi-charts-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+}
+
+.trends-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.trend-card {
+  cursor: pointer;
+  display: grid;
+  gap: 8px;
+}
+
+.trend-modal {
+  width: min(1180px, 100%);
 }
 
 .chart-card {
@@ -494,6 +548,35 @@ button:disabled {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
+}
+
+.breakdown-metric-grid {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: #fff;
+  margin-bottom: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.breakdown-metric-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.metric-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.active-toggle {
+  background: #dbeafe;
+  border-color: #93c5fd;
 }
 
 .scatter-grid {
@@ -654,6 +737,28 @@ th {
 .status-pill.fatigue-bad {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.fatigue-badge-btn {
+  border: 0;
+  cursor: pointer;
+}
+
+.fatigue-badge-btn:hover {
+  transform: none;
+  opacity: 0.9;
+}
+
+.fatigue-popover {
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 8px;
+  min-width: 280px;
+  display: grid;
+  gap: 3px;
+  font-size: 0.76rem;
 }
 
 .creative-thumb {
@@ -1065,6 +1170,7 @@ table tbody tr:hover {
   }
 
   .kpi-charts-grid,
+  .trends-grid,
   .glossary-grid,
   .alerts-grid,
   .target-grid,
